@@ -1,0 +1,285 @@
+{
+  "name": "Flow Health Monitor · SILENT / FAILING / SLOW alerts (by @SaiTarunRonanki)",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Flow Health Monitor\nErrors are loud. A flow that quietly stops running for 3 days is the one that hurts.\n\n**Every 15 min** this reads your workflows + recent executions through the n8n API and flags:\n- 🔕 **SILENT**: no success within 2× the expected interval (from the Schedule Trigger, or inferred from run gaps)\n- 🔴 **FAILING**: 3+ errors in a row\n- 🐢 **SLOW**: last run > 3× median duration\n\n**Alerts once per incident** (state kept in workflow static data), plus a ✅ when it recovers. No spam.\n\n### Setup\n1. Settings → n8n API → create a key\n2. Set env vars `N8N_BASE_URL` (e.g. https://n8n.acme.com) and `N8N_API_KEY`\n3. Connect Slack on **Slack alert** (channel `#client-alerts`). Optional: enable **Telegram alert** and set `TELEGRAM_CHAT_ID`\n4. Edit **Settings**, then **activate**. Static data only persists on active (production) runs, not manual tests.\n\nTip: run it on a different instance than the one it watches, so it still alerts if that one goes down.\n\nDashboard + source: github.com/Saitarun29/flow-health-monitor · by @SaiTarunRonanki",
+        "height": 620,
+        "width": 440,
+        "color": 5
+      },
+      "id": "a028c20b-edd0-42c4-8254-ada6c78133d1",
+      "name": "Sticky Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -520,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "8bb48a27-ffaa-4dd7-ac5f-fe86364eaa20",
+      "name": "Every 15 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Edit these, then activate the workflow.\nreturn [{ json: {\n  clientLabel: 'Acme Corp (n8n.acme.com)', // shown in every alert\n  silentMultiplier: 2,   // SILENT: no success within 2x the expected interval\n  failStreak: 3,         // FAILING: this many errors in a row\n  slowMultiplier: 3,     // SLOW: last run > 3x median duration\n  ignore: [],            // workflow IDs to skip, e.g. ['abc123']\n  overrides: {},         // expected interval in minutes for webhook flows, e.g. { def456: 60 }\n} }];"
+      },
+      "id": "50993186-7fb4-412c-8e91-72ec67d2dc12",
+      "name": "Settings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.N8N_BASE_URL }}/api/v1/workflows",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "limit",
+              "value": "250"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-N8N-API-KEY",
+              "value": "={{ $env.N8N_API_KEY }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "c2b1c6fd-c206-4542-bb10-4a7f3e3b2317",
+      "name": "Get Workflows",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.N8N_BASE_URL }}/api/v1/executions",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "limit",
+              "value": "250"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-N8N-API-KEY",
+              "value": "={{ $env.N8N_API_KEY }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "cb9605e6-0eb8-48bb-a9ed-ee8d4f29f18b",
+      "name": "Get Executions",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Flow Health Monitor: compute health + dedup (one alert per incident, one on recovery).\n// Rules: SILENT = no success within 2x expected interval (and errors don't explain the gap)\n//        FAILING = 3+ consecutive errors · SLOW = last duration > 3x median · OK\nconst cfg = $('Settings').first().json;\nconst workflows = $('Get Workflows').first().json.data || [];\nconst executions = $input.first().json.data || [];\nconst now = Date.now();\nconst MIN = 60000;\nconst store = $getWorkflowStaticData('global');\nstore.incidents = store.incidents || {};\n\nconst UNIT = { seconds: 1 / 60, minutes: 1, hours: 60, days: 1440, weeks: 10080, months: 43200 };\nconst KEY = { seconds: 'secondsInterval', minutes: 'minutesInterval', hours: 'hoursInterval', days: 'daysInterval', weeks: 'weeksInterval', months: 'monthsInterval' };\nfunction cronMin(expr) {\n  let f = String(expr || '').trim().split(/\\s+/); if (f.length === 6) f = f.slice(1); if (f.length < 5) return null;\n  const [mi, h, dom, , dow] = f; const st = (v) => (/^\\*\\/(\\d+)$/.exec(v) || [])[1]; const n = (v) => v.split(',').length;\n  if (mi === '*') return 1; if (st(mi)) return +st(mi); if (h === '*') return 60 / n(mi); if (st(h)) return (+st(h) * 60) / n(mi);\n  if (dow !== '*' && dom === '*') return 10080 / (n(dow) * n(h) * n(mi)); if (dom !== '*') return 43200 / (n(dom) * n(h) * n(mi));\n  return 1440 / (n(h) * n(mi));\n}\nfunction intervalOf(wf) {\n  if (cfg.overrides && cfg.overrides[wf.id]) return cfg.overrides[wf.id];\n  for (const node of wf.nodes || []) {\n    if (node.disabled) continue;\n    const p = node.parameters || {};\n    if (String(node.type).endsWith('.scheduleTrigger')) {\n      const rules = (p.rule && p.rule.interval && p.rule.interval.length) ? p.rule.interval : [{ field: 'days' }];\n      const mins = rules.map((r) => r.field === 'cronExpression' ? cronMin(r.expression) : (UNIT[r.field || 'days'] || 1440) * (Number(r[KEY[r.field || 'days']] || 1) || 1)).filter(Boolean);\n      if (mins.length) return Math.min(...mins);\n    }\n  }\n  return null; // event-driven: inferred below\n}\nconst median = (a) => { a = a.filter(Number.isFinite).sort((x, y) => x - y); if (!a.length) return null; const m = Math.floor(a.length / 2); return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2; };\nconst fmt = (min) => min < 60 ? `${Math.round(min)} min` : min < 2880 ? `${+(min / 60).toFixed(1)} h` : `${+(min / 1440).toFixed(1)} days`;\nconst isErr = (s) => ['error', 'crashed', 'failed'].includes(s);\n\nconst out = [];\nfor (const wf of workflows) {\n  if ((cfg.ignore || []).includes(String(wf.id)) || String(wf.id) === String($workflow.id)) continue;\n  const runs = executions.filter((e) => String(e.workflowId) === String(wf.id))\n    .map((e) => ({ status: e.status || (e.finished ? 'success' : 'error'), start: Date.parse(e.startedAt), stop: e.stoppedAt ? Date.parse(e.stoppedAt) : null }))\n    .sort((a, b) => b.start - a.start);\n  if (wf.active === false && !(runs[0] && now - runs[0].start < 7 * 1440 * MIN)) continue; // skip long-paused flows\n  const done = runs.filter((r) => r.status === 'success' || isErr(r.status));\n  const oks = done.filter((r) => r.status === 'success');\n  let streak = 0; for (const r of done) { if (isErr(r.status)) streak++; else break; }\n  let interval = intervalOf(wf);\n  if (!interval && runs.length >= 4) {\n    const gaps = runs.slice(0, 40).slice(1).map((r, i) => (runs[i].start - r.start) / MIN).sort((a, b) => a - b);\n    interval = Math.max(1, Math.round(gaps[Math.round(0.75 * (gaps.length - 1))]));\n  }\n  const lastOk = oks[0] ? (oks[0].stop || oks[0].start) : null;\n  const sinceOk = lastOk ? (now - lastOk) / MIN : null;\n  const sinceRun = runs[0] ? (now - (runs[0].stop || runs[0].start)) / MIN : null;\n  const limit = interval ? interval * cfg.silentMultiplier : null;\n  const durs = oks.map((r) => (r.stop && r.start ? r.stop - r.start : null)).filter(Number.isFinite);\n  const latest = done[0];\n  const latestDur = latest && latest.stop ? latest.stop - latest.start : null;\n  const base = median(latest && latest.status === 'success' ? durs.slice(1) : durs);\n\n  let status = 'OK', reason = 'healthy';\n  if (streak >= cfg.failStreak) { status = 'FAILING'; reason = `${streak} consecutive errors`; }\n  else if (limit && runs.length && (sinceOk == null || (sinceOk > limit && !(streak > 0 && sinceRun <= limit)))) {\n    status = 'SILENT'; reason = sinceOk == null ? 'no successful run in recent history' : `no success for ${fmt(sinceOk)} (expected every ${fmt(interval)})`;\n  } else if (latestDur && base && durs.length >= 5 && latestDur > base * cfg.slowMultiplier) {\n    status = 'SLOW'; reason = `last run ${(latestDur / base).toFixed(1)}x slower than median`;\n  }\n\n  const prev = store.incidents[wf.id];\n  let kind = 'none';\n  if (status !== 'OK' && (!prev || prev.status !== status)) { kind = 'incident'; store.incidents[wf.id] = { status, since: now }; }\n  else if (status === 'OK' && prev) { kind = 'recovered'; delete store.incidents[wf.id]; }\n  if (status !== 'OK' && wf.active === false) reason += ' · workflow is deactivated';\n\n  const emoji = { SILENT: '🔕', FAILING: '🔴', SLOW: '🐢' }[status] || '✅';\n  const title = kind === 'recovered' ? 'RECOVERED' : status;\n  const lastOkTxt = lastOk ? new Date(lastOk).toISOString().replace('T', ' ').slice(0, 16) + ' UTC' : 'never';\n  const link = `${$env.N8N_BASE_URL}/workflow/${wf.id}`;\n  const text = `${emoji} *${title}* · *${wf.name}*\\nClient: ${cfg.clientLabel}\\n> ${kind === 'recovered' ? `Back to healthy after ${fmt((now - prev.since) / MIN)}` : reason}\\nLast success: ${lastOkTxt} · Fail streak: ${streak}\\n<${link}|Open workflow in n8n>`;\n  out.push({ json: { workflowId: wf.id, name: wf.name, status, reason, kind, shouldAlert: kind !== 'none', text } });\n}\nreturn out.length ? out : [{ json: { shouldAlert: false, kind: 'none', note: 'no workflows' } }];\n"
+      },
+      "id": "8b449608-8315-4022-be00-7c43a0c787ca",
+      "name": "Compute Health",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "bf8780d8-9664-4b01-81f0-ccbb1c07653d",
+              "leftValue": "={{ $json.shouldAlert }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "61b5c07c-732c-4094-9ad3-306a3f2f453c",
+      "name": "New incident or recovery?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "#client-alerts",
+          "mode": "name"
+        },
+        "text": "={{ $json.text }}",
+        "otherOptions": {}
+      },
+      "id": "38fadf7d-4cde-4963-88b0-39d776ea9db9",
+      "name": "Slack alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        1340,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID }}",
+        "text": "={{ $json.text.replace(/\\*/g, '').replace(/^> /m, '').replace(/<([^|]+)\\|([^>]+)>/, '$2: $1') }}",
+        "additionalFields": {}
+      },
+      "id": "d401b808-33d0-424f-b68a-a04c7398fe8a",
+      "name": "Telegram alert",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1340,
+        400
+      ],
+      "disabled": true
+    }
+  ],
+  "connections": {
+    "Every 15 min": {
+      "main": [
+        [
+          {
+            "node": "Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Settings": {
+      "main": [
+        [
+          {
+            "node": "Get Workflows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Workflows": {
+      "main": [
+        [
+          {
+            "node": "Get Executions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Executions": {
+      "main": [
+        [
+          {
+            "node": "Compute Health",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute Health": {
+      "main": [
+        [
+          {
+            "node": "New incident or recovery?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "New incident or recovery?": {
+      "main": [
+        [
+          {
+            "node": "Slack alert",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Telegram alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Flow Health Monitor · n8n workflow health</title>
+  <meta name="description" content="Health dashboard for n8n workflows. Flags silent, failing and slow flows across client instances, summarises incidents in plain English and previews the Slack alert." />
+  <meta property="og:title" content="Flow Health Monitor · n8n workflow health" />
+  <meta property="og:description" content="Errors are loud. A flow that quietly stops running for 3 days is the one that hurts. See every n8n workflow's health at a glance." />
+  <meta property="og:type" content="website" />
+  <meta name="twitter:card" content="summary" />
+  <meta name="theme-color" content="#F7F7F5" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23111111'/%3E%3Cpath d='M6 17h5l2.5-6 4 11 3-7 1.5 2H26' fill='none' stroke='white' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/assets/style.css" />
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <div class="app">
+    <aside class="side" aria-label="Sidebar">
+      <div class="brand">
+        <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#111"/><path d="M6 17h5l2.5-6 4 11 3-7 1.5 2H26" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>Flow Health</span>
+      </div>
+      <nav aria-label="Clients">
+        <div class="nav-label">Clients</div>
+        <ul class="nav" id="clientNav"></ul>
+      </nav>
+      <nav aria-label="Status">
+        <div class="nav-label">Status</div>
+        <ul class="nav" id="statusNav"></ul>
+      </nav>
+      <div class="side-foot">
+        <a href="/n8n/flow-health-monitor.n8n.json" download>Download n8n workflow</a>
+        <a href="https://github.com/Saitarun29/flow-health-monitor" target="_blank" rel="noopener">Source on GitHub</a>
+      </div>
+    </aside>
+
+    <main id="main" class="main">
+      <header class="page-head">
+        <div>
+          <div class="crumbs"><span>Flow Health Monitor</span><span aria-hidden="true">/</span><span id="crumbScope">All clients</span></div>
+          <h1>Workflow health</h1>
+          <p class="lede">Errors are loud. A flow that quietly stops running for 3 days is the one that hurts. This watches every n8n workflow for silence, failure streaks and slowdowns.</p>
+        </div>
+        <div class="head-actions">
+          <span id="sourceBadge" class="badge">Demo data</span>
+          <button class="btn" id="rescanBtn" type="button">Re-scan</button>
+          <button class="btn btn-primary" id="connectBtn" type="button">Connect n8n</button>
+        </div>
+      </header>
+
+      <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+
+      <section class="stats" id="stats" aria-label="Health summary" aria-live="polite"></section>
+
+      <section class="panel" aria-labelledby="wfTitle">
+        <div class="panel-bar">
+          <h2 id="wfTitle">Workflows <span class="count" id="wfCount"></span></h2>
+          <div class="bar-right">
+            <label class="search">
+              <span class="sr-only">Search workflows</span>
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M10.5 10.5 14 14" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+              <input id="search" type="search" placeholder="Search workflows" maxlength="60" autocomplete="off" />
+            </label>
+            <label class="sr-only" for="clientSelect">Client</label>
+            <select id="clientSelect" class="select mobile-only"></select>
+          </div>
+        </div>
+        <div class="table" role="table" aria-label="Workflow health" aria-describedby="scannedAt">
+          <div class="tr th" role="row">
+            <div role="columnheader">Workflow</div>
+            <div role="columnheader">Status</div>
+            <div role="columnheader">Last success</div>
+            <div role="columnheader" class="r">Fail streak</div>
+            <div role="columnheader" class="r">Avg duration</div>
+            <div role="columnheader">Last 24 runs</div>
+          </div>
+          <div id="rows" role="rowgroup"></div>
+        </div>
+        <div class="panel-foot"><span id="scannedAt"></span><span class="legend-inline"><i class="lg lg-ok"></i>success <i class="lg lg-bad"></i>error <i class="lg lg-miss"></i>missed</span></div>
+      </section>
+
+      <section class="rules" aria-labelledby="rulesTitle">
+        <h2 id="rulesTitle">How health is judged</h2>
+        <dl class="rule-grid">
+          <div><dt><span class="pill pill-SILENT">Silent</span></dt><dd>No successful run within 2× the expected interval, and errors don't explain the gap. The trigger stopped firing or the flow was switched off.</dd></div>
+          <div><dt><span class="pill pill-FAILING">Failing</span></dt><dd>3 or more consecutive errors on the most recent runs. Usually a revoked credential or a changed API.</dd></div>
+          <div><dt><span class="pill pill-SLOW">Slow</span></dt><dd>Latest run took more than 3× the median of earlier successful runs. Often comes right before timeouts.</dd></div>
+          <div><dt><span class="pill pill-OK">Healthy</span></dt><dd>Running on cadence. The interval comes from the Schedule Trigger, or is inferred from run gaps for webhook flows.</dd></div>
+        </dl>
+        <div class="n8n-row">
+          <div>
+            <h3>Run the same checks inside n8n</h3>
+            <p>Schedule (15 min) → n8n API → Code → IF → Slack. Alerts once per incident and once on recovery, so the channel stays quiet.</p>
+          </div>
+          <a class="btn" href="/n8n/flow-health-monitor.n8n.json" download>Download workflow JSON</a>
+        </div>
+      </section>
+
+      <footer class="foot">
+        <div>
+          <div>Built by Sai Tarun · <a href="https://saitarun.com" target="_blank" rel="noopener">saitarun.com</a></div>
+          <nav class="foot-links" aria-label="Author links">
+            <a href="https://saitarun.com" target="_blank" rel="noopener">Site</a>
+            <a href="https://linkedin.com/in/ronanki-sai-tarun" target="_blank" rel="noopener">LinkedIn</a>
+            <a href="https://x.com/SaiTarunRonanki" target="_blank" rel="noopener">X</a>
+            <a href="https://github.com/Saitarun29/flow-health-monitor" target="_blank" rel="noopener">GitHub</a>
+          </nav>
+        </div>
+        <a class="btn" href="https://wa.me/918008941430?text=Hello%20Sai%20Tarun%20Ronanki,%20I%20want%20to%20discuss%20about%20my%20workflow" target="_blank" rel="noopener">Discuss your workflow →</a>
+      </footer>
+    </main>
+  </div>
+
+  <!-- Detail drawer -->
+  <div class="scrim" id="scrim" hidden></div>
+  <aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="dTitle" aria-hidden="true" tabindex="-1">
+    <div class="drawer-inner" id="drawerBody"></div>
+  </aside>
+
+  <!-- Connect modal -->
+  <dialog class="modal" id="connectModal" aria-labelledby="connectTitle">
+    <form id="connectForm" class="modal-card" autocomplete="off" novalidate>
+      <div class="modal-head">
+        <h3 id="connectTitle">Connect your n8n</h3>
+        <button class="icon-btn" type="button" id="closeModal" aria-label="Close">
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+      <p class="muted">Read-only scan of workflows and recent executions through the n8n public API.</p>
+      <label for="fBase">Base URL</label>
+      <input id="fBase" name="baseUrl" type="text" inputmode="url" autocapitalize="off" spellcheck="false" placeholder="https://n8n.yourdomain.com" maxlength="300" />
+      <label for="fKey">API key <span class="muted">Settings → n8n API</span></label>
+      <input id="fKey" name="apiKey" type="password" placeholder="n8n_api_…" maxlength="600" spellcheck="false" />
+      <label for="fLabel">Client label <span class="muted">optional</span></label>
+      <input id="fLabel" name="label" type="text" placeholder="Acme Corp" maxlength="60" />
+      <div class="privacy">
+        <strong>Your key is used once and not saved.</strong>
+        It is sent only to your n8n in the <code>X-N8N-API-KEY</code> header for this scan, never stored or logged, and cleared from this form afterwards. A dedicated key you delete later is the safest option.
+      </div>
+      <p class="muted small">The instance must be reachable from the public internet. On a private network, import the n8n workflow instead.</p>
+      <div id="connectError" class="form-error" role="alert" hidden></div>
+      <div class="modal-actions">
+        <button class="btn" type="button" id="useSample">Use demo data</button>
+        <button class="btn btn-primary" type="submit" id="scanSubmit">Scan workflows</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="/assets/app.js"></script>
+</body>
+</html>

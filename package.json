@@ -1,0 +1,7 @@
+{
+  "name": "flow-health-monitor",
+  "version": "1.0.0",
+  "description": "n8n workflow health dashboard: flags SILENT, FAILING and SLOW flows across client instances, explains incidents with AI and previews Slack/Telegram alerts.",
+  "type": "module",
+  "private": true
+}
